@@ -28,6 +28,17 @@ type S3Client struct {
 
 // NewS3Client creates a new S3 client instance
 func NewS3Client(s3config S3ClientConfig) (*S3Client, error) {
+	// Set default values
+	if s3config.ChunkSize == 0 {
+		s3config.ChunkSize = 5 * 1024 * 1024 // 5MB minimum for S3 multipart
+	}
+	if s3config.MaxRetries == 0 {
+		s3config.MaxRetries = 3
+	}
+	if s3config.Region == "" {
+		s3config.Region = "us-east-1"
+	}
+
 	// Load AWS configuration
 	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion(s3config.Region))
 	if err != nil {
@@ -60,7 +71,7 @@ func (sc *S3Client) CheckHealth(ctx context.Context) error {
 func (sc *S3Client) UploadData(ctx context.Context, key string, data []byte) error {
 	dataSize := int64(len(data))
 
-	// Use simple put for small files
+	// Use simple put for small chunks so that it does not block on buffer
 	if dataSize < sc.config.ChunkSize {
 		return sc.simplePutObject(ctx, key, data)
 	}
@@ -96,6 +107,7 @@ func (sc *S3Client) simplePutObject(ctx context.Context, key string, data []byte
 }
 
 // multipartUpload uploads data using S3 multipart upload
+// based on https://docs.aws.amazon.com/AmazonS3/latest/userguide/mpu-upload-object.html
 func (sc *S3Client) multipartUpload(ctx context.Context, key string, data []byte) error {
 	uploadCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()

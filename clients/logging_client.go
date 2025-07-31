@@ -50,6 +50,26 @@ type LoggingClient struct {
 
 func NewLoggingClient(loggingClientConfig LoggingClientConfig) (*LoggingClient, error) {
 
+	// Set default values
+	if loggingClientConfig.BufferSize == 0 {
+		loggingClientConfig.BufferSize = 1000
+	}
+	if loggingClientConfig.FlushInterval == 0 {
+		loggingClientConfig.FlushInterval = 30 * time.Second
+	}
+	if loggingClientConfig.HeartbeatInterval == 0 {
+		loggingClientConfig.HeartbeatInterval = 60 * time.Second
+	}
+	if loggingClientConfig.ChunkSize == 0 {
+		loggingClientConfig.ChunkSize = 5 * 1024 * 1024 // 5MB minimum for S3 multipart
+	}
+	if loggingClientConfig.MaxRetries == 0 {
+		loggingClientConfig.MaxRetries = 3
+	}
+	if loggingClientConfig.Region == "" {
+		loggingClientConfig.Region = "us-east-1"
+	}
+
 	// Create S3 client
 	s3Config := S3ClientConfig{
 		BucketName: loggingClientConfig.BucketName,
