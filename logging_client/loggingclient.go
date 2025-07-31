@@ -3,6 +3,7 @@ package logging_client
 import (
 	"context"
 	"fmt"
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	_ "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -50,7 +51,7 @@ func NewLoggingClient(loggingClientConfig LoggingClientConfig) (*LoggingClient, 
 	s3Client := s3.NewFromConfig(cfg)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	// Don't defer cancel here - store it in the struct instead
+	// Don't defer cancel here - store it in the struct instead else heartbeat does not work as expected.
 
 	client := &LoggingClient{
 		Config:    loggingClientConfig,
@@ -82,7 +83,7 @@ func (lc *LoggingClient) Close() error {
 	return nil
 }
 
-// heart beat functionality
+// IsHealthy heart beat functionality
 func (lc *LoggingClient) IsHealthy() bool {
 	lc.Mu.RLock()
 	defer lc.Mu.RUnlock()
@@ -110,7 +111,24 @@ func (lc *LoggingClient) heartbeatLoop() {
 }
 
 func (lc *LoggingClient) checkS3Health() {
-	// check s3 status here
-	fmt.Println("heartbeat check")
+	// Create a timeout context for the health check
+	ctx, cancel := context.WithTimeout(lc.Ctx, 10*time.Second)
+	defer cancel()
+
+	// Try to head the bucket to check connectivity as per aws docs
+	_, err := lc.S3Client.HeadBucket(ctx, &s3.HeadBucketInput{
+		Bucket: aws.String(lc.Config.BucketName),
+	})
+
+	lc.Mu.Lock()
+	defer lc.Mu.Unlock()
+
+	if err != nil {
+		lc.isHealthy = false
+		fmt.Printf("S3 health check failed: %v\n", err)
+	} else {
+		lc.isHealthy = true
+		fmt.Println("S3 health check passed")
+	}
 
 }
