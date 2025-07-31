@@ -5,10 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
 	_ "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"log"
 	"strings"
 	"sync"
@@ -28,17 +25,18 @@ type LoggingClientConfig struct {
 	BucketName string
 	Region     string
 	ChunkSize  int64
-	// from the caller
+	MaxRetries int
+	KeyPrefix  string
+
+	// memory size and timings etc
 	BufferSize        int
 	HeartbeatInterval time.Duration
-	MaxRetries        int
-	KeyPrefix         string
 	FlushInterval     time.Duration
 }
 
 type LoggingClient struct {
 	Config      LoggingClientConfig
-	S3Client    *s3.Client
+	S3Client    *S3Client
 	Buffer      []LogEntry
 	HeartbeatMu sync.RWMutex
 	BufferMu    sync.RWMutex
@@ -51,13 +49,19 @@ type LoggingClient struct {
 }
 
 func NewLoggingClient(loggingClientConfig LoggingClientConfig) (*LoggingClient, error) {
-	// Load AWS configuration
-	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion(loggingClientConfig.Region))
-	if err != nil {
-		return nil, fmt.Errorf("failed to load AWS config: %w", err)
+
+	// Create S3 client
+	s3Config := S3ClientConfig{
+		BucketName: loggingClientConfig.BucketName,
+		Region:     loggingClientConfig.Region,
+		ChunkSize:  loggingClientConfig.ChunkSize,
+		MaxRetries: loggingClientConfig.MaxRetries,
 	}
 
-	s3Client := s3.NewFromConfig(cfg)
+	s3Client, err := NewS3Client(s3Config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create S3 client: %w", err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	// Don't defer cancel here - store it in the struct instead else heartbeat does not work as expected.
@@ -144,15 +148,7 @@ func (lc *LoggingClient) heartbeatLoop() {
 }
 
 func (lc *LoggingClient) checkS3Health() {
-	// Create a timeout context for the health check
-	ctx, cancel := context.WithTimeout(lc.Ctx, 10*time.Second)
-	defer cancel()
-
-	// Try to head the bucket to check connectivity as per aws docs
-	_, err := lc.S3Client.HeadBucket(ctx, &s3.HeadBucketInput{
-		Bucket: aws.String(lc.Config.BucketName),
-	})
-
+	err := lc.S3Client.CheckHealth(lc.Ctx)
 	lc.HeartbeatMu.Lock()
 	defer lc.HeartbeatMu.Unlock()
 
@@ -204,7 +200,7 @@ func (lc *LoggingClient) flushBuffer() {
 		time.Now().UnixNano())
 
 	// Upload to S3 with multipart if data is large enough
-	if err := lc.uploadToS3(key, jsonData.Bytes()); err != nil {
+	if err := lc.S3Client.UploadData(lc.Ctx, key, jsonData.Bytes()); err != nil {
 		log.Printf("Failed to upload logs to S3: %v", err)
 		// Put the entries back in buffer for retry
 		lc.BufferMu.Lock()
