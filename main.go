@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"github.com/AbhilashaSGupta/loggingClient/logging_client" // Updated import path
 	"loggingClient/clients"
 	"time"
 )
@@ -10,7 +9,7 @@ import (
 func main() {
 	fmt.Println("start processing")
 
-	config := logging_client.LoggingClientConfig{
+	config := clients.LoggingClientConfig{
 		BucketName:        "my-log-bucket",
 		KeyPrefix:         "my-application-name",
 		BufferSize:        500,
@@ -21,7 +20,7 @@ func main() {
 
 	lc, err := clients.NewLoggingClient(config)
 	if err != nil {
-		fmt.Println("Failed to create logging client: %v", err)
+		fmt.Printf("Failed to create logging client: %v\n", err)
 	}
 	defer func(client *clients.LoggingClient) {
 		err := client.Close()
