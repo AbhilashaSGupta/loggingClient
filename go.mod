@@ -1,4 +1,4 @@
-module loggingClient
+module github.com/AbhilashaSGupta/loggingClient
 
 go 1.24.5
 
