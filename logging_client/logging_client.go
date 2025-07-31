@@ -1,12 +1,16 @@
 package logging_client
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	_ "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"log"
+	"strings"
 	"sync"
 	"time"
 )
@@ -27,18 +31,23 @@ type LoggingClientConfig struct {
 	// from the caller
 	BufferSize        int
 	HeartbeatInterval time.Duration
+	MaxRetries        int
+	KeyPrefix         string
+	FlushInterval     time.Duration
 }
 
 type LoggingClient struct {
-	Config    LoggingClientConfig
-	S3Client  *s3.Client
-	Buffer    []LogEntry
-	Mu        sync.RWMutex
-	isHealthy bool
-	Ctx       context.Context
-	Cancel    context.CancelFunc // Store the cancel function
+	Config      LoggingClientConfig
+	S3Client    *s3.Client
+	Buffer      []LogEntry
+	HeartbeatMu sync.RWMutex
+	BufferMu    sync.RWMutex
+	isHealthy   bool
+	Ctx         context.Context
+	Cancel      context.CancelFunc // Store the cancel function
 	// async heartbeat in background
-	Wg sync.WaitGroup
+	Wg        sync.WaitGroup
+	flushChan chan interface{}
 }
 
 func NewLoggingClient(loggingClientConfig LoggingClientConfig) (*LoggingClient, error) {
@@ -61,7 +70,7 @@ func NewLoggingClient(loggingClientConfig LoggingClientConfig) (*LoggingClient, 
 		Ctx:       ctx,
 		Cancel:    cancel,
 	}
-	// Start background goroutine
+	// Start background goroutine to heartbeat and flush
 	client.Wg.Add(1)
 	go client.heartbeatLoop()
 
@@ -69,6 +78,30 @@ func NewLoggingClient(loggingClientConfig LoggingClientConfig) (*LoggingClient, 
 	client.checkS3Health()
 
 	return client, nil
+}
+
+// Log adds a log entry to the buffer
+func (lc *LoggingClient) Log(level, message string, metadata map[string]interface{}) {
+	entry := LogEntry{
+		Timestamp: time.Now().UTC(),
+		Level:     level,
+		Message:   message,
+		Metadata:  metadata,
+	}
+
+	lc.BufferMu.Lock()
+	defer lc.BufferMu.Unlock()
+
+	lc.Buffer = append(lc.Buffer, entry)
+
+	// Trigger flush if buffer is full
+	if len(lc.Buffer) >= lc.Config.BufferSize {
+		select {
+		case lc.flushChan <- struct{}{}:
+		default:
+			// Channel is full, flush is already pending
+		}
+	}
 }
 
 func (lc *LoggingClient) Close() error {
@@ -85,8 +118,8 @@ func (lc *LoggingClient) Close() error {
 
 // IsHealthy heart beat functionality
 func (lc *LoggingClient) IsHealthy() bool {
-	lc.Mu.RLock()
-	defer lc.Mu.RUnlock()
+	lc.HeartbeatMu.RLock()
+	defer lc.HeartbeatMu.RUnlock()
 	return lc.isHealthy
 }
 
@@ -120,8 +153,8 @@ func (lc *LoggingClient) checkS3Health() {
 		Bucket: aws.String(lc.Config.BucketName),
 	})
 
-	lc.Mu.Lock()
-	defer lc.Mu.Unlock()
+	lc.HeartbeatMu.Lock()
+	defer lc.HeartbeatMu.Unlock()
 
 	if err != nil {
 		lc.isHealthy = false
@@ -129,6 +162,55 @@ func (lc *LoggingClient) checkS3Health() {
 	} else {
 		lc.isHealthy = true
 		fmt.Println("S3 health check passed")
+		lc.flushBuffer()
 	}
 
+}
+
+// flushBuffer flushes the current buffer to S3
+func (lc *LoggingClient) flushBuffer() {
+	lc.BufferMu.Lock()
+	if len(lc.Buffer) == 0 {
+		lc.BufferMu.Unlock()
+		return
+	}
+
+	// Copy buffer and clear it
+	entries := make([]LogEntry, len(lc.Buffer))
+	copy(entries, lc.Buffer)
+	lc.Buffer = lc.Buffer[:0]
+	lc.BufferMu.Unlock()
+
+	// Convert entries to JSON
+	var jsonData bytes.Buffer
+	encoder := json.NewEncoder(&jsonData)
+	for _, entry := range entries {
+		if err := encoder.Encode(entry); err != nil {
+			log.Printf("Failed to encode log entry: %v", err)
+			continue
+		}
+	}
+
+	if jsonData.Len() == 0 {
+		return
+	}
+
+	// Generate S3 key
+	const layout = "2006/01/02/15"
+	timestamp := time.Now().UTC().Format(layout)
+	key := fmt.Sprintf("%s/logs-%s-%d.jsonl",
+		strings.TrimSuffix(lc.Config.KeyPrefix, "/"),
+		timestamp,
+		time.Now().UnixNano())
+
+	// Upload to S3 with multipart if data is large enough
+	if err := lc.uploadToS3(key, jsonData.Bytes()); err != nil {
+		log.Printf("Failed to upload logs to S3: %v", err)
+		// Put the entries back in buffer for retry
+		lc.BufferMu.Lock()
+		lc.Buffer = append(entries, lc.Buffer...)
+		lc.BufferMu.Unlock()
+	} else {
+		log.Printf("Successfully uploaded %d log entries to S3: %s", len(entries), key)
+	}
 }
