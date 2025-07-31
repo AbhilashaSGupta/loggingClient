@@ -4,29 +4,30 @@ import (
 	"fmt"
 	"log"
 	"loggingClient/logging_client"
-	"loggingClient/models"
+	"time"
 )
 
 func main() {
 	fmt.Println("start processing")
 
-	config := models.LoggingClientConfig{
-		BucketName: "my-log-bucket",
-		BufferSize: 500,
-		ChunkSize:  5 * 1024 * 1024, // 5MB
-		Region:     "us-west-2",
+	config := logging_client.LoggingClientConfig{
+		BucketName:        "my-log-bucket",
+		BufferSize:        500,
+		ChunkSize:         5 * 1024 * 1024, // 5MB
+		Region:            "us-west-2",
+		HeartbeatInterval: 1 * time.Second,
 	}
 
-	client, err := logging_client.NewLoggingClient(config)
+	lc, err := logging_client.NewLoggingClient(config)
 	if err != nil {
 		log.Fatalf("Failed to create logging client: %v", err)
 	}
-	defer func(client *models.LoggingClient) {
+	defer func(client *logging_client.LoggingClient) {
 		err := client.Close()
 		if err != nil {
 			fmt.Println("error closing the logging client")
 		}
-	}(client)
-
+	}(lc)
+	time.Sleep(1 * time.Minute)
 	fmt.Println("finished processing")
 }
